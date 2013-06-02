@@ -142,12 +142,8 @@ impl<T> DList<T> {
             fail!("This dlist is empty; that node can't be on it.")
         }
         if !nobe.linked { fail!("That node isn't linked to any dlist.") }
-        if !((nobe.prev.is_some()
-              || managed::mut_ptr_eq(self.hd.expect("headless dlist?"),
-                                 nobe)) &&
-             (nobe.next.is_some()
-              || managed::mut_ptr_eq(self.tl.expect("tailless dlist?"),
-                                 nobe))) {
+        if !((nobe.prev.is_some() || managed::mut_ptr_eq(self.hd.get(), nobe)) &&
+             (nobe.next.is_some() || managed::mut_ptr_eq(self.tl.get(), nobe))) {
             fail!("That node isn't on this dlist.")
         }
     }
@@ -518,12 +514,8 @@ impl<T> BaseIter<T> for @mut DList<T> {
                 fail!("The dlist became empty during iteration??")
             }
             if !nobe.linked ||
-                (!((nobe.prev.is_some()
-                    || managed::mut_ptr_eq(self.hd.expect("headless dlist?"),
-                                           nobe))
-                   && (nobe.next.is_some()
-                    || managed::mut_ptr_eq(self.tl.expect("tailless dlist?"),
-                                           nobe)))) {
+                (!((nobe.prev.is_some() || managed::mut_ptr_eq(self.hd.get(), nobe)) &&
+                   (nobe.next.is_some() || managed::mut_ptr_eq(self.tl.get(), nobe)))) {
                 fail!("Removing a dlist node during iteration is forbidden!")
             }
             link = nobe.next_link();
