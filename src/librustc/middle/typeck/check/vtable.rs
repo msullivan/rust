@@ -16,7 +16,7 @@ use middle::typeck::check::{structurally_resolved_type};
 use middle::typeck::infer::fixup_err_to_str;
 use middle::typeck::infer::{resolve_and_force_all_but_regions, resolve_type};
 use middle::typeck::infer;
-use middle::typeck::{CrateCtxt, vtable_origin, vtable_res};
+use middle::typeck::{CrateCtxt, vtable_origin, vtable_res, vtable_param_res};
 use middle::typeck::{vtable_static, vtable_param, vtable_self};
 use middle::subst::Subst;
 use util::common::indenter;
@@ -84,41 +84,10 @@ fn lookup_vtables(vcx: &VtableContext,
            substs.repr(vcx.tcx()));
     let _i = indenter();
 
-    let tcx = vcx.tcx();
     let mut result = ~[];
-    let mut i = 0u;
-    for substs.tps.iter().advance |ty| {
-        // ty is the value supplied for the type parameter A...
-        let mut param_result = ~[];
-
-        for ty::each_bound_trait_and_supertraits(
-            tcx, type_param_defs[i].bounds) |trait_ref|
-        {
-            // ...and here trait_ref is each bound that was declared on A,
-            // expressed in terms of the type parameters.
-
-            debug!("about to subst: %s, %s", trait_ref.repr(tcx), substs.repr(tcx));
-
-            // Substitute the values of the type parameters that may
-            // appear in the bound.
-            let trait_ref = trait_ref.subst(tcx, substs);
-
-            debug!("after subst: %s", trait_ref.repr(tcx));
-
-            match lookup_vtable(vcx, location_info, *ty, trait_ref, is_early) {
-                Some(vtable) => param_result.push(vtable),
-                None => {
-                    vcx.tcx().sess.span_fatal(
-                        location_info.span,
-                        fmt!("failed to find an implementation of \
-                              trait %s for %s",
-                             vcx.infcx.trait_ref_to_str(trait_ref),
-                             vcx.infcx.ty_to_str(*ty)));
-                }
-            }
-        }
-        result.push(@param_result);
-        i += 1u;
+    for substs.tps.iter().zip(type_param_defs.iter()).advance |(ty, def)| {
+        result.push(lookup_vtables_for_param(vcx, location_info, Some(substs),
+                                             &*def.bounds, *ty, is_early));
     }
     debug!("lookup_vtables result(\
             location_info=%?, \
@@ -130,6 +99,62 @@ fn lookup_vtables(vcx: &VtableContext,
            substs.repr(vcx.tcx()),
            result.repr(vcx.tcx()));
     @result
+}
+
+fn lookup_vtables_for_param(vcx: &VtableContext,
+                            location_info: &LocationInfo,
+                            // None for substs means the identity
+                            substs: Option<&ty::substs>,
+                            type_param_bounds: &ty::ParamBounds,
+                            ty: ty::t,
+                            is_early: bool) -> vtable_param_res {
+    let tcx = vcx.tcx();
+
+    // ty is the value supplied for the type parameter A...
+    let mut param_result = ~[];
+
+    for ty::each_bound_trait_and_supertraits(
+        tcx, type_param_bounds) |trait_ref|
+    {
+        // ...and here trait_ref is each bound that was declared on A,
+        // expressed in terms of the type parameters.
+
+
+
+        // Substitute the values of the type parameters that may
+        // appear in the bound.
+        let trait_ref = substs.map_default(trait_ref, |substs| {
+            debug!("about to subst: %s, %s",
+                   trait_ref.repr(tcx), substs.repr(tcx));
+            trait_ref.subst(tcx, *substs)
+        });
+
+        debug!("after subst: %s", trait_ref.repr(tcx));
+
+        match lookup_vtable(vcx, location_info, ty, trait_ref, is_early) {
+            Some(vtable) => param_result.push(vtable),
+            None => {
+                vcx.tcx().sess.span_fatal(
+                    location_info.span,
+                    fmt!("failed to find an implementation of \
+                          trait %s for %s",
+                         vcx.infcx.trait_ref_to_str(trait_ref),
+                         vcx.infcx.ty_to_str(ty)));
+            }
+        }
+    }
+
+    debug!("lookup_vtables_for_param result(\
+            location_info=%?, \
+            type_param_bounds=%s, \
+            ty=%s, \
+            result=%s)",
+           location_info,
+           type_param_bounds.repr(vcx.tcx()),
+           ty.repr(vcx.tcx()),
+           param_result.repr(vcx.tcx()));
+
+    return @param_result;
 }
 
 fn fixup_substs(vcx: &VtableContext,
@@ -682,10 +707,13 @@ pub fn resolve_impl(ccx: @mut CrateCtxt, impl_item: @ast::item) {
         Some(trait_ref) => {
             let infcx = infer::new_infer_ctxt(ccx.tcx);
             let vcx = VtableContext { ccx: ccx, infcx: infcx };
-            let trait_def = ty::lookup_trait_def(ccx.tcx, trait_ref.def_id);
+            let loc_info = location_info_for_item(impl_item);
 
+            // First, check that the impl implements any trait bounds
+            // on the trait.
+            let trait_def = ty::lookup_trait_def(ccx.tcx, trait_ref.def_id);
             let vtbls = lookup_vtables(&vcx,
-                                       &location_info_for_item(impl_item),
+                                       &loc_info,
                                        *trait_def.generics.type_param_defs,
                                        &trait_ref.substs,
                                        false);
