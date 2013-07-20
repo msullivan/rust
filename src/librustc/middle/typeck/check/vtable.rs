@@ -371,23 +371,6 @@ fn search_for_vtable(vcx: &VtableContext,
         relate_trait_refs(vcx, location_info, of_trait_ref, trait_ref);
 
 
-        // For now, I don't want to change anything about the behavior
-        // of is_early. So if we are is_early, do a fixup_substs and
-        // return if it fails.
-        if is_early {
-            match fixup_substs(vcx,
-                               location_info,
-                               trait_ref.def_id,
-                               substs.clone(),
-                               is_early) {
-                Some(_) => { },
-                None => {
-                    // Bail out with a bogus answer
-                    return Some(vtable_param(0, 0));
-                }
-            }
-        }
-
         // Recall that trait_ref -- the trait type we're casting to --
         // is the trait with id trait_ref.def_id applied to the substs
         // trait_ref.substs.
