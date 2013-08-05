@@ -17,10 +17,8 @@
 // 3. assignments do not affect things loaned out as immutable
 // 4. moves do not affect things loaned out in any way
 
-use core::prelude::*;
 
-use core::hashmap::HashSet;
-use core::uint;
+use std::hashmap::HashSet;
 use mc = middle::mem_categorization;
 use middle::borrowck::*;
 use middle::moves;
@@ -29,51 +27,54 @@ use syntax::ast::{m_mutbl, m_imm, m_const};
 use syntax::ast;
 use syntax::ast_util;
 use syntax::codemap::span;
-use syntax::visit;
+use syntax::oldvisit;
 use util::ppaux::Repr;
 
+#[deriving(Clone)]
 struct CheckLoanCtxt<'self> {
     bccx: @BorrowckCtxt,
     dfcx_loans: &'self LoanDataFlow,
-    move_data: move_data::FlowedMoveData,
+    move_data: @move_data::FlowedMoveData,
     all_loans: &'self [Loan],
-    reported: @mut HashSet<ast::node_id>,
+    reported: @mut HashSet<ast::NodeId>,
 }
 
 pub fn check_loans(bccx: @BorrowckCtxt,
                    dfcx_loans: &LoanDataFlow,
                    move_data: move_data::FlowedMoveData,
                    all_loans: &[Loan],
-                   body: &ast::blk) {
-    debug!("check_loans(body id=%?)", body.node.id);
+                   body: &ast::Block) {
+    debug!("check_loans(body id=%?)", body.id);
 
-    let clcx = @mut CheckLoanCtxt {
+    let clcx = CheckLoanCtxt {
         bccx: bccx,
         dfcx_loans: dfcx_loans,
-        move_data: move_data,
+        move_data: @move_data,
         all_loans: all_loans,
         reported: @mut HashSet::new(),
     };
 
-    let vt = visit::mk_vt(@visit::Visitor {visit_expr: check_loans_in_expr,
-                                           visit_local: check_loans_in_local,
-                                           visit_block: check_loans_in_block,
-                                           visit_pat: check_loans_in_pat,
-                                           visit_fn: check_loans_in_fn,
-                                           .. *visit::default_visitor()});
+    let vt = oldvisit::mk_vt(@oldvisit::Visitor {
+        visit_expr: check_loans_in_expr,
+        visit_local: check_loans_in_local,
+        visit_block: check_loans_in_block,
+        visit_pat: check_loans_in_pat,
+        visit_fn: check_loans_in_fn,
+        .. *oldvisit::default_visitor()
+    });
     (vt.visit_block)(body, (clcx, vt));
 }
 
 enum MoveError {
     MoveOk,
-    MoveWhileBorrowed(/*move*/@LoanPath, /*loan*/@LoanPath, /*loan*/span)
+    MoveWhileBorrowed(/*loan*/@LoanPath, /*loan*/span)
 }
 
 impl<'self> CheckLoanCtxt<'self> {
     pub fn tcx(&self) -> ty::ctxt { self.bccx.tcx }
 
     pub fn each_issued_loan(&self,
-                            scope_id: ast::node_id,
+                            scope_id: ast::NodeId,
                             op: &fn(&Loan) -> bool)
                             -> bool {
         //! Iterates over each loan that has been issued
@@ -82,65 +83,64 @@ impl<'self> CheckLoanCtxt<'self> {
         //! are issued for future scopes and thus they may have been
         //! *issued* but not yet be in effect.
 
-        for self.dfcx_loans.each_bit_on_entry_frozen(scope_id) |loan_index| {
+        do self.dfcx_loans.each_bit_on_entry_frozen(scope_id) |loan_index| {
             let loan = &self.all_loans[loan_index];
-            if !op(loan) {
-                return false;
-            }
+            op(loan)
         }
-        return true;
     }
 
     pub fn each_in_scope_loan(&self,
-                              scope_id: ast::node_id,
+                              scope_id: ast::NodeId,
                               op: &fn(&Loan) -> bool)
                               -> bool {
         //! Like `each_issued_loan()`, but only considers loans that are
         //! currently in scope.
 
         let region_maps = self.tcx().region_maps;
-        for self.each_issued_loan(scope_id) |loan| {
+        do self.each_issued_loan(scope_id) |loan| {
             if region_maps.is_subscope_of(scope_id, loan.kill_scope) {
-                if !op(loan) {
-                    return false;
-                }
+                op(loan)
+            } else {
+                true
             }
         }
-        return true;
     }
 
     pub fn each_in_scope_restriction(&self,
-                                     scope_id: ast::node_id,
+                                     scope_id: ast::NodeId,
                                      loan_path: @LoanPath,
                                      op: &fn(&Loan, &Restriction) -> bool)
                                      -> bool {
         //! Iterates through all the in-scope restrictions for the
         //! given `loan_path`
 
-        for self.each_in_scope_loan(scope_id) |loan| {
-            for loan.restrictions.each |restr| {
+        do self.each_in_scope_loan(scope_id) |loan| {
+            let mut ret = true;
+            for restr in loan.restrictions.iter() {
                 if restr.loan_path == loan_path {
                     if !op(loan, restr) {
-                        return false;
+                        ret = false;
+                        break;
                     }
                 }
             }
+            ret
         }
-        return true;
     }
 
-    pub fn loans_generated_by(&self, scope_id: ast::node_id) -> ~[uint] {
+    pub fn loans_generated_by(&self, scope_id: ast::NodeId) -> ~[uint] {
         //! Returns a vector of the loans that are generated as
         //! we encounter `scope_id`.
 
         let mut result = ~[];
-        for self.dfcx_loans.each_gen_bit_frozen(scope_id) |loan_index| {
+        do self.dfcx_loans.each_gen_bit_frozen(scope_id) |loan_index| {
             result.push(loan_index);
-        }
+            true
+        };
         return result;
     }
 
-    pub fn check_for_conflicting_loans(&mut self, scope_id: ast::node_id) {
+    pub fn check_for_conflicting_loans(&self, scope_id: ast::NodeId) {
         //! Checks to see whether any of the loans that are issued
         //! by `scope_id` conflict with loans that have already been
         //! issued when we enter `scope_id` (for example, we do not
@@ -151,16 +151,17 @@ impl<'self> CheckLoanCtxt<'self> {
         let new_loan_indices = self.loans_generated_by(scope_id);
         debug!("new_loan_indices = %?", new_loan_indices);
 
-        for self.each_issued_loan(scope_id) |issued_loan| {
-            for new_loan_indices.each |&new_loan_index| {
+        do self.each_issued_loan(scope_id) |issued_loan| {
+            for &new_loan_index in new_loan_indices.iter() {
                 let new_loan = &self.all_loans[new_loan_index];
                 self.report_error_if_loans_conflict(issued_loan, new_loan);
             }
-        }
+            true
+        };
 
-        for uint::range(0, new_loan_indices.len()) |i| {
+        for i in range(0u, new_loan_indices.len()) {
             let old_loan = &self.all_loans[new_loan_indices[i]];
-            for uint::range(i+1, new_loan_indices.len()) |j| {
+            for j in range(i+1, new_loan_indices.len()) {
                 let new_loan = &self.all_loans[new_loan_indices[j]];
                 self.report_error_if_loans_conflict(old_loan, new_loan);
             }
@@ -210,7 +211,7 @@ impl<'self> CheckLoanCtxt<'self> {
         };
         debug!("illegal_if=%?", illegal_if);
 
-        for loan1.restrictions.each |restr| {
+        for restr in loan1.restrictions.iter() {
             if !restr.set.intersects(illegal_if) { loop; }
             if restr.loan_path != loan2.loan_path { loop; }
 
@@ -232,7 +233,7 @@ impl<'self> CheckLoanCtxt<'self> {
                     self.bccx.span_err(
                         new_loan.span,
                         fmt!("cannot borrow `%s` as %s because \
-                              it is also borrowed as %s"
+                              it is also borrowed as %s",
                              self.bccx.loan_path_to_str(new_loan.loan_path),
                              self.bccx.mut_to_str(new_loan.mutbl),
                              self.bccx.mut_to_str(old_loan.mutbl)));
@@ -256,7 +257,7 @@ impl<'self> CheckLoanCtxt<'self> {
     }
 
     pub fn check_if_path_is_moved(&self,
-                                  id: ast::node_id,
+                                  id: ast::NodeId,
                                   span: span,
                                   use_kind: MovedValueUseKind,
                                   lp: @LoanPath) {
@@ -267,15 +268,15 @@ impl<'self> CheckLoanCtxt<'self> {
 
         debug!("check_if_path_is_moved(id=%?, use_kind=%?, lp=%s)",
                id, use_kind, lp.repr(self.bccx.tcx));
-        for self.move_data.each_move_of(id, lp) |move, moved_lp| {
+        do self.move_data.each_move_of(id, lp) |move, moved_lp| {
             self.bccx.report_use_of_moved_value(
                 span,
                 use_kind,
                 lp,
                 move,
                 moved_lp);
-            return;
-        }
+            false
+        };
     }
 
     pub fn check_assignment(&self, expr: @ast::expr) {
@@ -307,20 +308,20 @@ impl<'self> CheckLoanCtxt<'self> {
         if self.is_local_variable(cmt) {
             assert!(cmt.mutbl.is_immutable()); // no "const" locals
             let lp = opt_loan_path(cmt).get();
-            for self.move_data.each_assignment_of(expr.id, lp) |assign| {
+            do self.move_data.each_assignment_of(expr.id, lp) |assign| {
                 self.bccx.report_reassigned_immutable_variable(
                     expr.span,
                     lp,
                     assign);
-                return;
-            }
+                false
+            };
             return;
         }
 
         // Otherwise, just a plain error.
         self.bccx.span_err(
             expr.span,
-            fmt!("cannot assign to %s %s"
+            fmt!("cannot assign to %s %s",
                  cmt.mutbl.to_user_str(),
                  self.bccx.cmt_to_str(cmt)));
         return;
@@ -349,7 +350,7 @@ impl<'self> CheckLoanCtxt<'self> {
                         cmt = b;
                     }
 
-                    mc::cat_rvalue |
+                    mc::cat_rvalue(*) |
                     mc::cat_static_item |
                     mc::cat_implicit_self |
                     mc::cat_copied_upvar(*) |
@@ -461,14 +462,18 @@ impl<'self> CheckLoanCtxt<'self> {
             // `RESTR_MUTATE` restriction whenever the contents of an
             // owned pointer are borrowed, and hence while `v[*]` is not
             // restricted from being written, `v` is.
-            for this.each_in_scope_restriction(expr.id, loan_path)
+            let cont = do this.each_in_scope_restriction(expr.id, loan_path)
                 |loan, restr|
             {
                 if restr.set.intersects(RESTR_MUTATE) {
                     this.report_illegal_mutation(expr, loan_path, loan);
-                    return false;
+                    false
+                } else {
+                    true
                 }
-            }
+            };
+
+            if !cont { return false }
 
             // The previous code handled assignments to paths that
             // have been restricted. This covers paths that have been
@@ -524,12 +529,16 @@ impl<'self> CheckLoanCtxt<'self> {
                 }
 
                 // Check for a non-const loan of `loan_path`
-                for this.each_in_scope_loan(expr.id) |loan| {
+                let cont = do this.each_in_scope_loan(expr.id) |loan| {
                     if loan.loan_path == loan_path && loan.mutbl != m_const {
                         this.report_illegal_mutation(expr, full_loan_path, loan);
-                        return false;
+                        false
+                    } else {
+                        true
                     }
-                }
+                };
+
+                if !cont { return false }
             }
         }
     }
@@ -548,54 +557,63 @@ impl<'self> CheckLoanCtxt<'self> {
                  self.bccx.loan_path_to_str(loan_path)));
     }
 
-    pub fn check_move_out_from_expr(&self, ex: @ast::expr) {
-        match ex.node {
-            ast::expr_paren(*) => {
-                /* In the case of an expr_paren(), the expression inside
-                 * the parens will also be marked as being moved.  Ignore
-                 * the parents then so as not to report duplicate errors. */
+    fn check_move_out_from_expr(&self, expr: @ast::expr) {
+        match expr.node {
+            ast::expr_fn_block(*) => {
+                // moves due to capture clauses are checked
+                // in `check_loans_in_fn`, so that we can
+                // give a better error message
             }
             _ => {
-                let cmt = self.bccx.cat_expr(ex);
-                match self.analyze_move_out_from_cmt(cmt) {
-                    MoveOk => {}
-                    MoveWhileBorrowed(move_path, loan_path, loan_span) => {
-                        self.bccx.span_err(
-                            cmt.span,
-                            fmt!("cannot move out of `%s` \
-                                  because it is borrowed",
-                                 self.bccx.loan_path_to_str(move_path)));
-                        self.bccx.span_note(
-                            loan_span,
-                            fmt!("borrow of `%s` occurs here",
-                                 self.bccx.loan_path_to_str(loan_path)));
-                    }
-                }
+                self.check_move_out_from_id(expr.id, expr.span)
             }
         }
     }
 
-    pub fn analyze_move_out_from_cmt(&self, cmt: mc::cmt) -> MoveError {
-        debug!("analyze_move_out_from_cmt(cmt=%s)", cmt.repr(self.tcx()));
+    fn check_move_out_from_id(&self, id: ast::NodeId, span: span) {
+        do self.move_data.each_path_moved_by(id) |_, move_path| {
+            match self.analyze_move_out_from(id, move_path) {
+                MoveOk => {}
+                MoveWhileBorrowed(loan_path, loan_span) => {
+                    self.bccx.span_err(
+                        span,
+                        fmt!("cannot move out of `%s` \
+                              because it is borrowed",
+                             self.bccx.loan_path_to_str(move_path)));
+                    self.bccx.span_note(
+                        loan_span,
+                        fmt!("borrow of `%s` occurs here",
+                             self.bccx.loan_path_to_str(loan_path)));
+                }
+            }
+            true
+        };
+    }
+
+    pub fn analyze_move_out_from(&self,
+                                 expr_id: ast::NodeId,
+                                 move_path: @LoanPath) -> MoveError {
+        debug!("analyze_move_out_from(expr_id=%?, move_path=%s)",
+               expr_id, move_path.repr(self.tcx()));
 
         // FIXME(#4384) inadequare if/when we permit `move a.b`
 
-        // check for a conflicting loan:
-        let r = opt_loan_path(cmt);
-        for r.iter().advance |&lp| {
-            for self.each_in_scope_restriction(cmt.id, lp) |loan, _| {
-                // Any restriction prevents moves.
-                return MoveWhileBorrowed(lp, loan.loan_path, loan.span);
-            }
-        }
+        let mut ret = MoveOk;
 
-        MoveOk
+        // check for a conflicting loan:
+        do self.each_in_scope_restriction(expr_id, move_path) |loan, _| {
+            // Any restriction prevents moves.
+            ret = MoveWhileBorrowed(loan.loan_path, loan.span);
+            false
+        };
+
+        ret
     }
 
-    pub fn check_call(&mut self,
+    pub fn check_call(&self,
                       _expr: @ast::expr,
                       _callee: Option<@ast::expr>,
-                      _callee_id: ast::node_id,
+                      _callee_id: ast::NodeId,
                       _callee_span: span,
                       _args: &[@ast::expr]) {
         // NB: This call to check for conflicting loans is not truly
@@ -608,58 +626,54 @@ impl<'self> CheckLoanCtxt<'self> {
     }
 }
 
-fn check_loans_in_fn<'a>(fk: &visit::fn_kind,
+fn check_loans_in_fn<'a>(fk: &oldvisit::fn_kind,
                          decl: &ast::fn_decl,
-                         body: &ast::blk,
+                         body: &ast::Block,
                          sp: span,
-                         id: ast::node_id,
-                         (this, visitor): (@mut CheckLoanCtxt<'a>,
-                                           visit::vt<@mut CheckLoanCtxt<'a>>)) {
+                         id: ast::NodeId,
+                         (this, visitor): (CheckLoanCtxt<'a>,
+                                           oldvisit::vt<CheckLoanCtxt<'a>>)) {
     match *fk {
-        visit::fk_item_fn(*) |
-        visit::fk_method(*) => {
+        oldvisit::fk_item_fn(*) |
+        oldvisit::fk_method(*) => {
             // Don't process nested items.
             return;
         }
 
-        visit::fk_anon(*) |
-        visit::fk_fn_block(*) => {
+        oldvisit::fk_anon(*) |
+        oldvisit::fk_fn_block(*) => {
             check_captured_variables(this, id, sp);
         }
     }
 
-    visit::visit_fn(fk, decl, body, sp, id, (this, visitor));
+    oldvisit::visit_fn(fk, decl, body, sp, id, (this, visitor));
 
-    fn check_captured_variables(this: @mut CheckLoanCtxt,
-                                closure_id: ast::node_id,
+    fn check_captured_variables(this: CheckLoanCtxt,
+                                closure_id: ast::NodeId,
                                 span: span) {
         let cap_vars = this.bccx.capture_map.get(&closure_id);
-        for cap_vars.each |cap_var| {
+        for cap_var in cap_vars.iter() {
+            let var_id = ast_util::def_id_of_def(cap_var.def).node;
+            let var_path = @LpVar(var_id);
+            this.check_if_path_is_moved(closure_id, span,
+                                        MovedInCapture, var_path);
             match cap_var.mode {
-                moves::CapRef | moves::CapCopy => {
-                    let var_id = ast_util::def_id_of_def(cap_var.def).node;
-                    let lp = @LpVar(var_id);
-                    this.check_if_path_is_moved(closure_id, span,
-                                                MovedInCapture, lp);
-                }
+                moves::CapRef | moves::CapCopy => {}
                 moves::CapMove => {
-                    check_by_move_capture(this, closure_id, cap_var);
+                    check_by_move_capture(this, closure_id, cap_var, var_path);
                 }
             }
         }
         return;
 
-        fn check_by_move_capture(this: @mut CheckLoanCtxt,
-                                 closure_id: ast::node_id,
-                                 cap_var: &moves::CaptureVar) {
-            let var_id = ast_util::def_id_of_def(cap_var.def).node;
-            let ty = ty::node_id_to_type(this.tcx(), var_id);
-            let cmt = this.bccx.cat_def(closure_id, cap_var.span,
-                                        ty, cap_var.def);
-            let move_err = this.analyze_move_out_from_cmt(cmt);
+        fn check_by_move_capture(this: CheckLoanCtxt,
+                                 closure_id: ast::NodeId,
+                                 cap_var: &moves::CaptureVar,
+                                 move_path: @LoanPath) {
+            let move_err = this.analyze_move_out_from(closure_id, move_path);
             match move_err {
                 MoveOk => {}
-                MoveWhileBorrowed(move_path, loan_path, loan_span) => {
+                MoveWhileBorrowed(loan_path, loan_span) => {
                     this.bccx.span_err(
                         cap_var.span,
                         fmt!("cannot move `%s` into closure \
@@ -675,25 +689,22 @@ fn check_loans_in_fn<'a>(fk: &visit::fn_kind,
     }
 }
 
-fn check_loans_in_local<'a>(local: @ast::local,
-                            (this, vt): (@mut CheckLoanCtxt<'a>,
-                                         visit::vt<@mut CheckLoanCtxt<'a>>)) {
-    visit::visit_local(local, (this, vt));
+fn check_loans_in_local<'a>(local: @ast::Local,
+                            (this, vt): (CheckLoanCtxt<'a>,
+                                         oldvisit::vt<CheckLoanCtxt<'a>>)) {
+    oldvisit::visit_local(local, (this, vt));
 }
 
 fn check_loans_in_expr<'a>(expr: @ast::expr,
-                           (this, vt): (@mut CheckLoanCtxt<'a>,
-                                        visit::vt<@mut CheckLoanCtxt<'a>>)) {
-    visit::visit_expr(expr, (this, vt));
+                           (this, vt): (CheckLoanCtxt<'a>,
+                                        oldvisit::vt<CheckLoanCtxt<'a>>)) {
+    oldvisit::visit_expr(expr, (this, vt));
 
     debug!("check_loans_in_expr(expr=%s)",
            expr.repr(this.tcx()));
 
     this.check_for_conflicting_loans(expr.id);
-
-    if this.bccx.moves_map.contains(&expr.id) {
-        this.check_move_out_from_expr(expr);
-    }
+    this.check_move_out_from_expr(expr);
 
     match expr.node {
       ast::expr_self |
@@ -702,7 +713,7 @@ fn check_loans_in_expr<'a>(expr: @ast::expr,
               let cmt = this.bccx.cat_expr_unadjusted(expr);
               debug!("path cmt=%s", cmt.repr(this.tcx()));
               let r = opt_loan_path(cmt);
-              for r.iter().advance |&lp| {
+              for &lp in r.iter() {
                   this.check_if_path_is_moved(expr.id, expr.span, MovedInUse, lp);
               }
           }
@@ -739,29 +750,18 @@ fn check_loans_in_expr<'a>(expr: @ast::expr,
 }
 
 fn check_loans_in_pat<'a>(pat: @ast::pat,
-                          (this, vt): (@mut CheckLoanCtxt<'a>,
-                                       visit::vt<@mut CheckLoanCtxt<'a>>))
+                          (this, vt): (CheckLoanCtxt<'a>,
+                                       oldvisit::vt<CheckLoanCtxt<'a>>))
 {
     this.check_for_conflicting_loans(pat.id);
-
-    // Note: moves out of pattern bindings are not checked by
-    // the borrow checker, at least not directly.  What happens
-    // is that if there are any moved bindings, the discriminant
-    // will be considered a move, and this will be checked as
-    // normal.  Then, in `middle::check_match`, we will check
-    // that no move occurs in a binding that is underneath an
-    // `@` or `&`.  Together these give the same guarantees as
-    // `check_move_out_from_expr()` without requiring us to
-    // rewalk the patterns and rebuild the pattern
-    // categorizations.
-
-    visit::visit_pat(pat, (this, vt));
+    this.check_move_out_from_id(pat.id, pat.span);
+    oldvisit::visit_pat(pat, (this, vt));
 }
 
-fn check_loans_in_block<'a>(blk: &ast::blk,
-                            (this, vt): (@mut CheckLoanCtxt<'a>,
-                                         visit::vt<@mut CheckLoanCtxt<'a>>))
+fn check_loans_in_block<'a>(blk: &ast::Block,
+                            (this, vt): (CheckLoanCtxt<'a>,
+                                         oldvisit::vt<CheckLoanCtxt<'a>>))
 {
-    visit::visit_block(blk, (this, vt));
-    this.check_for_conflicting_loans(blk.node.id);
+    oldvisit::visit_block(blk, (this, vt));
+    this.check_for_conflicting_loans(blk.id);
 }

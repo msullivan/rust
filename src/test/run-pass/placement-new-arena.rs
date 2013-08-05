@@ -11,12 +11,12 @@
 // except according to those terms.
 
 extern mod extra;
-use extra::arena;
+use extra::arena::Arena;
 
 pub fn main() {
-    let mut arena = arena::Arena();
+    let mut arena = Arena::new();
     let p = &mut arena;
     let x = p.alloc(|| 4u);
-    print(fmt!("%u", *x));
+    printf!("%u", *x);
     assert_eq!(*x, 4u);
 }

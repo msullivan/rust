@@ -8,14 +8,12 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use core::prelude::*;
 
 use syntax::ast;
 use syntax::codemap::{span};
-use syntax::visit;
+use syntax::oldvisit;
 
-use core::hashmap::HashSet;
-use core::io;
+use std::hashmap::HashSet;
 use extra;
 
 pub fn time<T>(do_it: bool, what: ~str, thunk: &fn() -> T) -> T {
@@ -23,7 +21,7 @@ pub fn time<T>(do_it: bool, what: ~str, thunk: &fn() -> T) -> T {
     let start = extra::time::precise_time_s();
     let rv = thunk();
     let end = extra::time::precise_time_s();
-    io::println(fmt!("time: %3.3f s\t%s", end - start, what));
+    printfln!("time: %3.3f s\t%s", end - start, what);
     rv
 }
 
@@ -41,7 +39,7 @@ pub struct _indenter {
 }
 
 impl Drop for _indenter {
-    fn finalize(&self) { debug!("<<"); }
+    fn drop(&self) { debug!("<<"); }
 }
 
 pub fn _indenter(_i: ()) -> _indenter {
@@ -55,54 +53,53 @@ pub fn indenter() -> _indenter {
     _indenter(())
 }
 
-pub fn field_expr(f: ast::field) -> @ast::expr { return f.node.expr; }
+pub fn field_expr(f: ast::Field) -> @ast::expr { return f.expr; }
 
-pub fn field_exprs(fields: ~[ast::field]) -> ~[@ast::expr] {
-    fields.map(|f| f.node.expr)
+pub fn field_exprs(fields: ~[ast::Field]) -> ~[@ast::expr] {
+    fields.map(|f| f.expr)
 }
 
 // Takes a predicate p, returns true iff p is true for any subexpressions
 // of b -- skipping any inner loops (loop, while, loop_body)
-pub fn loop_query(b: &ast::blk, p: @fn(&ast::expr_) -> bool) -> bool {
+pub fn loop_query(b: &ast::Block, p: @fn(&ast::expr_) -> bool) -> bool {
     let rs = @mut false;
     let visit_expr: @fn(@ast::expr,
                         (@mut bool,
-                         visit::vt<@mut bool>)) = |e, (flag, v)| {
+                         oldvisit::vt<@mut bool>)) = |e, (flag, v)| {
         *flag |= p(&e.node);
         match e.node {
           // Skip inner loops, since a break in the inner loop isn't a
           // break inside the outer loop
-          ast::expr_loop(*) | ast::expr_while(*)
-          | ast::expr_loop_body(*) => {}
-          _ => visit::visit_expr(e, (flag, v))
+          ast::expr_loop(*) | ast::expr_while(*) => {}
+          _ => oldvisit::visit_expr(e, (flag, v))
         }
     };
-    let v = visit::mk_vt(@visit::Visitor {
+    let v = oldvisit::mk_vt(@oldvisit::Visitor {
         visit_expr: visit_expr,
-        .. *visit::default_visitor()});
-    visit::visit_block(b, (rs, v));
+        .. *oldvisit::default_visitor()});
+    oldvisit::visit_block(b, (rs, v));
     return *rs;
 }
 
 // Takes a predicate p, returns true iff p is true for any subexpressions
 // of b -- skipping any inner loops (loop, while, loop_body)
-pub fn block_query(b: &ast::blk, p: @fn(@ast::expr) -> bool) -> bool {
+pub fn block_query(b: &ast::Block, p: @fn(@ast::expr) -> bool) -> bool {
     let rs = @mut false;
     let visit_expr: @fn(@ast::expr,
                         (@mut bool,
-                         visit::vt<@mut bool>)) = |e, (flag, v)| {
+                         oldvisit::vt<@mut bool>)) = |e, (flag, v)| {
         *flag |= p(e);
-        visit::visit_expr(e, (flag, v))
+        oldvisit::visit_expr(e, (flag, v))
     };
-    let v = visit::mk_vt(@visit::Visitor{
+    let v = oldvisit::mk_vt(@oldvisit::Visitor{
         visit_expr: visit_expr,
-        .. *visit::default_visitor()});
-    visit::visit_block(b, (rs, v));
+        .. *oldvisit::default_visitor()});
+    oldvisit::visit_block(b, (rs, v));
     return *rs;
 }
 
-pub fn local_rhs_span(l: @ast::local, def: span) -> span {
-    match l.node.init {
+pub fn local_rhs_span(l: @ast::Local, def: span) -> span {
+    match l.init {
       Some(i) => return i.span,
       _ => return def
     }
@@ -114,4 +111,4 @@ pub fn pluralize(n: uint, s: ~str) -> ~str {
 }
 
 // A set of node IDs (used to keep track of which node IDs are for statements)
-pub type stmt_set = @mut HashSet<ast::node_id>;
+pub type stmt_set = @mut HashSet<ast::NodeId>;

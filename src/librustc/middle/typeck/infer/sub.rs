@@ -8,7 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use core::prelude::*;
 
 use middle::ty::{BuiltinBounds};
 use middle::ty;
@@ -18,9 +17,11 @@ use middle::typeck::infer::combine::*;
 use middle::typeck::infer::cres;
 use middle::typeck::infer::glb::Glb;
 use middle::typeck::infer::InferCtxt;
+use middle::typeck::infer::lattice::CombineFieldsLatticeMethods;
 use middle::typeck::infer::lub::Lub;
 use middle::typeck::infer::to_str::InferStr;
-use util::common::{indent, indenter};
+use middle::typeck::infer::{TypeTrace, Subtype};
+use util::common::{indenter};
 use util::ppaux::bound_region_to_str;
 
 use extra::list::Nil;
@@ -28,7 +29,6 @@ use extra::list;
 use syntax::abi::AbiSet;
 use syntax::ast;
 use syntax::ast::{Onceness, m_const, purity};
-use syntax::codemap::span;
 
 pub struct Sub(CombineFields);  // "subtype", "subregion" etc
 
@@ -36,7 +36,7 @@ impl Combine for Sub {
     fn infcx(&self) -> @mut InferCtxt { self.infcx }
     fn tag(&self) -> ~str { ~"sub" }
     fn a_is_expected(&self) -> bool { self.a_is_expected }
-    fn span(&self) -> span { self.span }
+    fn trace(&self) -> TypeTrace { self.trace }
 
     fn sub(&self) -> Sub { Sub(**self) }
     fn lub(&self) -> Lub { Lub(**self) }
@@ -62,12 +62,8 @@ impl Combine for Sub {
                self.tag(),
                a.inf_str(self.infcx),
                b.inf_str(self.infcx));
-        do indent {
-            match self.infcx.region_vars.make_subregion(self.span, a, b) {
-              Ok(()) => Ok(a),
-              Err(ref e) => Err((*e))
-            }
-        }
+        self.infcx.region_vars.make_subregion(Subtype(self.trace), a, b);
+        Ok(a)
     }
 
     fn mts(&self, a: &ty::mt, b: &ty::mt) -> cres<ty::mt> {
@@ -81,11 +77,11 @@ impl Combine for Sub {
           m_mutbl => {
             // If supertype is mut, subtype must match exactly
             // (i.e., invariant if mut):
-            eq_tys(self, a.ty, b.ty).then(|| Ok(copy *a) )
+            eq_tys(self, a.ty, b.ty).then(|| Ok(*a))
           }
           m_imm | m_const => {
             // Otherwise we can be covariant:
-            self.tys(a.ty, b.ty).chain(|_t| Ok(copy *a) )
+            self.tys(a.ty, b.ty).chain(|_t| Ok(*a) )
           }
         }
     }
@@ -170,7 +166,7 @@ impl Combine for Sub {
         // region variable.
         let (a_sig, _) =
             self.infcx.replace_bound_regions_with_fresh_regions(
-                self.span, a);
+                self.trace, a);
 
         // Second, we instantiate each bound region in the supertype with a
         // fresh concrete region.
@@ -179,7 +175,7 @@ impl Combine for Sub {
                                               None, b) |br| {
                 let skol = self.infcx.region_vars.new_skolemized(br);
                 debug!("Bound region %s skolemized to %?",
-                       bound_region_to_str(self.infcx.tcx, br),
+                       bound_region_to_str(self.infcx.tcx, "", false, br),
                        skol);
                 skol
             }
@@ -195,15 +191,17 @@ impl Combine for Sub {
         // that the skolemized regions do not "leak".
         let new_vars =
             self.infcx.region_vars.vars_created_since_snapshot(snapshot);
-        for list::each(skol_isr) |pair| {
+
+        let mut ret = Ok(sig);
+        do list::each(skol_isr) |pair| {
             let (skol_br, skol) = *pair;
             let tainted = self.infcx.region_vars.tainted(snapshot, skol);
-            for tainted.each |tainted_region| {
+            for tainted_region in tainted.iter() {
                 // Each skolemized should only be relatable to itself
                 // or new variables:
                 match *tainted_region {
                     ty::re_infer(ty::ReVar(ref vid)) => {
-                        if new_vars.contains(vid) { loop; }
+                        if new_vars.iter().any(|x| x == vid) { loop; }
                     }
                     _ => {
                         if *tainted_region == skol { loop; }
@@ -212,16 +210,19 @@ impl Combine for Sub {
 
                 // A is not as polymorphic as B:
                 if self.a_is_expected {
-                    return Err(ty::terr_regions_insufficiently_polymorphic(
+                    ret = Err(ty::terr_regions_insufficiently_polymorphic(
                         skol_br, *tainted_region));
+                    break
                 } else {
-                    return Err(ty::terr_regions_overly_polymorphic(
+                    ret = Err(ty::terr_regions_overly_polymorphic(
                         skol_br, *tainted_region));
+                    break
                 }
             }
-        }
+            ret.is_ok()
+        };
 
-        return Ok(sig);
+        ret
     }
 
     // Traits please (FIXME: #2794):

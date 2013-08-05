@@ -17,17 +17,17 @@ use middle::typeck::method_map;
 use util::ppaux;
 
 use syntax::ast::{deref, expr_call, expr_inline_asm, expr_method_call};
-use syntax::ast::{expr_unary, node_id, unsafe_blk, unsafe_fn};
+use syntax::ast::{expr_unary, unsafe_fn, expr_path};
 use syntax::ast;
 use syntax::codemap::span;
-use syntax::visit::{fk_item_fn, fk_method};
-use syntax::visit;
+use syntax::oldvisit::{fk_item_fn, fk_method};
+use syntax::oldvisit;
 
 #[deriving(Eq)]
 enum UnsafeContext {
     SafeContext,
     UnsafeFn,
-    UnsafeBlock(node_id),
+    UnsafeBlock(ast::NodeId),
 }
 
 struct Context {
@@ -47,7 +47,7 @@ fn type_is_unsafe_function(ty: ty::t) -> bool {
 
 pub fn check_crate(tcx: ty::ctxt,
                    method_map: method_map,
-                   crate: @ast::crate) {
+                   crate: &ast::Crate) {
     let context = @mut Context {
         method_map: method_map,
         unsafe_context: SafeContext,
@@ -71,7 +71,7 @@ pub fn check_crate(tcx: ty::ctxt,
         }
     };
 
-    let visitor = visit::mk_vt(@visit::Visitor {
+    let visitor = oldvisit::mk_vt(@oldvisit::Visitor {
         visit_fn: |fn_kind, fn_decl, block, span, node_id, (_, visitor)| {
             let (is_item_fn, is_unsafe_fn) = match *fn_kind {
                 fk_item_fn(_, _, purity, _) => (true, purity == unsafe_fn),
@@ -86,7 +86,7 @@ pub fn check_crate(tcx: ty::ctxt,
                 context.unsafe_context = SafeContext
             }
 
-            visit::visit_fn(fn_kind,
+            oldvisit::visit_fn(fn_kind,
                             fn_decl,
                             block,
                             span,
@@ -99,12 +99,12 @@ pub fn check_crate(tcx: ty::ctxt,
 
         visit_block: |block, (_, visitor)| {
             let old_unsafe_context = context.unsafe_context;
-            if block.node.rules == unsafe_blk &&
+            if block.rules == ast::UnsafeBlock &&
                     context.unsafe_context == SafeContext {
-                context.unsafe_context = UnsafeBlock(block.node.id)
+                context.unsafe_context = UnsafeBlock(block.id)
             }
 
-            visit::visit_block(block, ((), visitor));
+            oldvisit::visit_block(block, ((), visitor));
 
             context.unsafe_context = old_unsafe_context
         },
@@ -143,14 +143,22 @@ pub fn check_crate(tcx: ty::ctxt,
                 expr_inline_asm(*) => {
                     require_unsafe(expr.span, "use of inline assembly")
                 }
+                expr_path(*) => {
+                    match ty::resolve_expr(tcx, expr) {
+                        ast::def_static(_, true) => {
+                            require_unsafe(expr.span, "use of mutable static")
+                        }
+                        _ => {}
+                    }
+                }
                 _ => {}
             }
 
-            visit::visit_expr(expr, ((), visitor))
+            oldvisit::visit_expr(expr, ((), visitor))
         },
 
-        .. *visit::default_visitor()
+        .. *oldvisit::default_visitor()
     });
 
-    visit::visit_crate(crate, ((), visitor))
+    oldvisit::visit_crate(crate, ((), visitor))
 }

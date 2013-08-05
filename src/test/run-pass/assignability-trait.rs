@@ -12,34 +12,32 @@
 // making method calls, but only if there aren't any matches without
 // it.
 
-use std::vec;
-
 trait iterable<A> {
     fn iterate(&self, blk: &fn(x: &A) -> bool) -> bool;
 }
 
 impl<'self,A> iterable<A> for &'self [A] {
     fn iterate(&self, f: &fn(x: &A) -> bool) -> bool {
-        vec::each(*self, f)
+        self.iter().advance(f)
     }
 }
 
 impl<A> iterable<A> for ~[A] {
     fn iterate(&self, f: &fn(x: &A) -> bool) -> bool {
-        vec::each(*self, f)
+        self.iter().advance(f)
     }
 }
 
 fn length<A, T: iterable<A>>(x: T) -> uint {
     let mut len = 0;
-    for x.iterate() |_y| { len += 1 }
+    do x.iterate() |_y| { len += 1; true };
     return len;
 }
 
 pub fn main() {
     let x = ~[0,1,2,3];
     // Call a method
-    for x.iterate() |y| { assert!(x[*y] == *y); }
+    do x.iterate() |y| { assert!(x[*y] == *y); true };
     // Call a parameterized function
     assert_eq!(length(x.clone()), x.len());
     // Call a parameterized function, with type arguments that require
@@ -49,7 +47,7 @@ pub fn main() {
     // Now try it with a type that *needs* to be borrowed
     let z = [0,1,2,3];
     // Call a method
-    for z.iterate() |y| { assert!(z[*y] == *y); }
+    do z.iterate() |y| { assert!(z[*y] == *y); true };
     // Call a parameterized function
     assert_eq!(length::<int, &[int]>(z), z.len());
 }

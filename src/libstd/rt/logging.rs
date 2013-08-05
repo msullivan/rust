@@ -9,6 +9,8 @@
 // except according to those terms.
 
 use either::*;
+use libc;
+use str::StrSlice;
 
 pub trait Logger {
     fn log(&mut self, msg: Either<~str, &'static str>);
@@ -20,6 +22,10 @@ impl Logger for StdErrLogger {
     fn log(&mut self, msg: Either<~str, &'static str>) {
         use io::{Writer, WriterUtil};
 
+        if !should_log_console() {
+            return;
+        }
+
         let s: &str = match msg {
             Left(ref s) => {
                 let s: &str = *s;
@@ -30,10 +36,22 @@ impl Logger for StdErrLogger {
                 s
             }
         };
-        let dbg = ::libc::STDERR_FILENO as ::io::fd_t;
-        dbg.write_str(s);
-        dbg.write_str("\n");
-        dbg.flush();
+
+        // Truncate the string
+        let buf_bytes = 256;
+        if s.len() > buf_bytes {
+            let s = s.slice(0, buf_bytes) + "[...]";
+            print(s);
+        } else {
+            print(s)
+        };
+
+        fn print(s: &str) {
+            let dbg = ::libc::STDERR_FILENO as ::io::fd_t;
+            dbg.write_str(s);
+            dbg.write_str("\n");
+            dbg.flush();
+        }
     }
 }
 
@@ -41,18 +59,15 @@ impl Logger for StdErrLogger {
 /// per-module global logging flags based on the logging spec
 pub fn init(crate_map: *u8) {
     use os;
-    use str;
+    use str::StrSlice;
     use ptr;
     use option::{Some, None};
-    use libc::c_char;
 
     let log_spec = os::getenv("RUST_LOG");
     match log_spec {
         Some(spec) => {
-            do str::as_c_str(spec) |s| {
-                unsafe {
-                    rust_update_log_settings(crate_map, s);
-                }
+            do spec.as_c_str |buf| {
+                unsafe { rust_update_log_settings(crate_map, buf) }
             }
         }
         None => {
@@ -61,8 +76,16 @@ pub fn init(crate_map: *u8) {
             }
         }
     }
-
-    extern {
-        fn rust_update_log_settings(crate_map: *u8, settings: *c_char);
-    }
 }
+
+pub fn console_on() { unsafe { rust_log_console_on() } }
+pub fn console_off() { unsafe { rust_log_console_off() } }
+fn should_log_console() -> bool { unsafe { rust_should_log_console() != 0 } }
+
+extern {
+    fn rust_update_log_settings(crate_map: *u8, settings: *libc::c_char);
+    fn rust_log_console_on();
+    fn rust_log_console_off();
+    fn rust_should_log_console() -> libc::uintptr_t;
+}
+

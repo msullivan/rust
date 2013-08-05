@@ -12,8 +12,8 @@
 
 mod test {
     #[abi = "cdecl"]
-    pub extern {
-        pub unsafe fn free();
+    extern {
+        pub fn free();
     }
 }
 

@@ -14,23 +14,23 @@ use syntax::print::pp;
 use syntax::print::pprust;
 use syntax::parse::token;
 
-pub fn each_binding(l: @ast::local, f: @fn(@ast::Path, ast::node_id)) {
-    use syntax::visit;
+pub fn each_binding(l: @ast::Local, f: @fn(&ast::Path, ast::NodeId)) {
+    use syntax::oldvisit;
 
-    let vt = visit::mk_simple_visitor(
-        @visit::SimpleVisitor {
+    let vt = oldvisit::mk_simple_visitor(
+        @oldvisit::SimpleVisitor {
             visit_pat: |pat| {
                 match pat.node {
-                    ast::pat_ident(_, path, _) => {
+                    ast::pat_ident(_, ref path, _) => {
                         f(path, pat.id);
                     }
                     _ => {}
                 }
             },
-            .. *visit::default_simple_visitor()
+            .. *oldvisit::default_simple_visitor()
         }
     );
-    (vt.visit_pat)(l.node.pat, ((), vt));
+    (vt.visit_pat)(l.pat, ((), vt));
 }
 
 /// A utility function that hands off a pretty printer to a callback.

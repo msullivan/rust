@@ -1,4 +1,4 @@
-// Copyright 2012 The Rust Project Developers. See the COPYRIGHT
+// Copyright 2012-2013 The Rust Project Developers. See the COPYRIGHT
 // file at the top-level directory of this distribution and at
 // http://rust-lang.org/COPYRIGHT.
 //
@@ -8,7 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use core::prelude::*;
 
 use driver::session::Session;
 use middle::resolve;
@@ -18,20 +17,20 @@ use util::ppaux;
 
 use syntax::ast::*;
 use syntax::codemap;
-use syntax::{visit, ast_util, ast_map};
+use syntax::{oldvisit, ast_util, ast_map};
 
 pub fn check_crate(sess: Session,
-                   crate: @crate,
+                   crate: &Crate,
                    ast_map: ast_map::map,
                    def_map: resolve::DefMap,
                    method_map: typeck::method_map,
                    tcx: ty::ctxt) {
-    visit::visit_crate(crate, (false, visit::mk_vt(@visit::Visitor {
+    oldvisit::visit_crate(crate, (false, oldvisit::mk_vt(@oldvisit::Visitor {
         visit_item: |a,b| check_item(sess, ast_map, def_map, a, b),
         visit_pat: check_pat,
         visit_expr: |a,b|
             check_expr(sess, def_map, method_map, tcx, a, b),
-        .. *visit::default_visitor()
+        .. *oldvisit::default_visitor()
     })));
     sess.abort_if_errors();
 }
@@ -41,24 +40,24 @@ pub fn check_item(sess: Session,
                   def_map: resolve::DefMap,
                   it: @item,
                   (_is_const, v): (bool,
-                                   visit::vt<bool>)) {
+                                   oldvisit::vt<bool>)) {
     match it.node {
-      item_const(_, ex) => {
+      item_static(_, _, ex) => {
         (v.visit_expr)(ex, (true, v));
         check_item_recursion(sess, ast_map, def_map, it);
       }
       item_enum(ref enum_definition, _) => {
-        for (*enum_definition).variants.each |var| {
-            for var.node.disr_expr.iter().advance |ex| {
+        for var in (*enum_definition).variants.iter() {
+            for ex in var.node.disr_expr.iter() {
                 (v.visit_expr)(*ex, (true, v));
             }
         }
       }
-      _ => visit::visit_item(it, (false, v))
+      _ => oldvisit::visit_item(it, (false, v))
     }
 }
 
-pub fn check_pat(p: @pat, (_is_const, v): (bool, visit::vt<bool>)) {
+pub fn check_pat(p: @pat, (_is_const, v): (bool, oldvisit::vt<bool>)) {
     fn is_str(e: @expr) -> bool {
         match e.node {
             expr_vstore(
@@ -78,7 +77,7 @@ pub fn check_pat(p: @pat, (_is_const, v): (bool, visit::vt<bool>)) {
         if !is_str(a) { (v.visit_expr)(a, (true, v)); }
         if !is_str(b) { (v.visit_expr)(b, (true, v)); }
       }
-      _ => visit::visit_pat(p, (false, v))
+      _ => oldvisit::visit_pat(p, (false, v))
     }
 }
 
@@ -88,11 +87,11 @@ pub fn check_expr(sess: Session,
                   tcx: ty::ctxt,
                   e: @expr,
                   (is_const, v): (bool,
-                                  visit::vt<bool>)) {
+                                  oldvisit::vt<bool>)) {
     if is_const {
         match e.node {
           expr_unary(_, deref, _) => { }
-          expr_unary(_, box(_), _) | expr_unary(_, uniq(_), _) => {
+          expr_unary(_, box(_), _) | expr_unary(_, uniq, _) => {
             sess.span_err(e.span,
                           "disallowed operator in constant expression");
             return;
@@ -113,7 +112,7 @@ pub fn check_expr(sess: Session,
                               "` in a constant expression");
             }
           }
-          expr_path(pth) => {
+          expr_path(ref pth) => {
             // NB: In the future you might wish to relax this slightly
             // to handle on-demand instantiation of functions via
             // foo::<bar> in a const. Currently that is only done on
@@ -124,7 +123,7 @@ pub fn check_expr(sess: Session,
                              items without type parameters");
             }
             match def_map.find(&e.id) {
-              Some(&def_const(_)) |
+              Some(&def_static(*)) |
               Some(&def_fn(_, _)) |
               Some(&def_variant(_, _)) |
               Some(&def_struct(_)) => { }
@@ -161,7 +160,7 @@ pub fn check_expr(sess: Session,
           expr_field(*) |
           expr_index(*) |
           expr_tup(*) |
-          expr_struct(_, _, None) => { }
+          expr_struct(*) => { }
           expr_addr_of(*) => {
                 sess.span_err(
                     e.span,
@@ -192,7 +191,16 @@ pub fn check_expr(sess: Session,
       }
       _ => ()
     }
-    visit::visit_expr(e, (is_const, v));
+    oldvisit::visit_expr(e, (is_const, v));
+}
+
+#[deriving(Clone)]
+struct env {
+    root_it: @item,
+    sess: Session,
+    ast_map: ast_map::map,
+    def_map: resolve::DefMap,
+    idstack: @mut ~[NodeId]
 }
 
 // Make sure a const item doesn't recursively refer to itself
@@ -201,14 +209,6 @@ pub fn check_item_recursion(sess: Session,
                             ast_map: ast_map::map,
                             def_map: resolve::DefMap,
                             it: @item) {
-    struct env {
-        root_it: @item,
-        sess: Session,
-        ast_map: ast_map::map,
-        def_map: resolve::DefMap,
-        idstack: @mut ~[node_id]
-    }
-
     let env = env {
         root_it: it,
         sess: sess,
@@ -217,41 +217,36 @@ pub fn check_item_recursion(sess: Session,
         idstack: @mut ~[]
     };
 
-    let visitor = visit::mk_vt(@visit::Visitor {
+    let visitor = oldvisit::mk_vt(@oldvisit::Visitor {
         visit_item: visit_item,
         visit_expr: visit_expr,
-        .. *visit::default_visitor()
+        .. *oldvisit::default_visitor()
     });
     (visitor.visit_item)(it, (env, visitor));
 
-    fn visit_item(it: @item, (env, v): (env, visit::vt<env>)) {
-        if env.idstack.contains(&(it.id)) {
+    fn visit_item(it: @item, (env, v): (env, oldvisit::vt<env>)) {
+        if env.idstack.iter().any(|x| x == &(it.id)) {
             env.sess.span_fatal(env.root_it.span, "recursive constant");
         }
         env.idstack.push(it.id);
-        visit::visit_item(it, (env, v));
+        oldvisit::visit_item(it, (env, v));
         env.idstack.pop();
     }
 
-    fn visit_expr(e: @expr, (env, v): (env, visit::vt<env>)) {
+    fn visit_expr(e: @expr, (env, v): (env, oldvisit::vt<env>)) {
         match e.node {
-          expr_path(*) => {
-            match env.def_map.find(&e.id) {
-              Some(&def_const(def_id)) => {
-                if ast_util::is_local(def_id) {
-                  match env.ast_map.get_copy(&def_id.node) {
-                    ast_map::node_item(it, _) => {
-                      (v.visit_item)(it, (env, v));
-                    }
-                    _ => fail!("const not bound to an item")
-                  }
-                }
-              }
-              _ => ()
-            }
-          }
-          _ => ()
+            expr_path(*) => match env.def_map.find(&e.id) {
+                Some(&def_static(def_id, _)) if ast_util::is_local(def_id) =>
+                    match env.ast_map.get_copy(&def_id.node) {
+                        ast_map::node_item(it, _) => {
+                            (v.visit_item)(it, (env, v));
+                        }
+                        _ => fail!("const not bound to an item")
+                    },
+                _ => ()
+            },
+            _ => ()
         }
-        visit::visit_expr(e, (env, v));
+        oldvisit::visit_expr(e, (env, v));
     }
 }
